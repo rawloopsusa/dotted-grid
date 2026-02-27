@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dotted Grid</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #0a0a0a;
+    }
+
+    canvas {
+      display: block;
+      width: 1280px;
+      height: 760px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="grid" width="1280" height="760"></canvas>
+  <script>
+    const canvas = document.getElementById('grid');
+    const ctx = canvas.getContext('2d');
+
+    const WIDTH = 1280;
+    const HEIGHT = 760;
+    const BG_COLOR = '#121212';
+    const DOT_COLOR_RGB = { r: 92, g: 92, b: 92 };
+    const GAP = 28;
+    const BASE_RADIUS = 1.5;
+    const MAX_RADIUS = 8;
+    const HOVER_RADIUS = 150;
+    const CONNECT_DIST = 42;
+    const LINE_WIDTH = 0.8;
+    const LERP_SPEED = 0.06;
+
+    // Smooth cursor position (lerped)
+    let mouseX = -1000;
+    let mouseY = -1000;
+    let cursorX = -1000;
+    let cursorY = -1000;
+
+    // Simple noise function for organic shape
+    function noise(x, y) {
+      const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      return n - Math.floor(n);
+    }
+
+    function smoothNoise(angle, time, scale) {
+      const x = Math.cos(angle) * scale + time;
+      const y = Math.sin(angle) * scale + time * 0.7;
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const fx = x - ix;
+      const fy = y - iy;
+      const sx = fx * fx * (3 - 2 * fx);
+      const sy = fy * fy * (3 - 2 * fy);
+      const n00 = noise(ix, iy);
+      const n10 = noise(ix + 1, iy);
+      const n01 = noise(ix, iy + 1);
+      const n11 = noise(ix + 1, iy + 1);
+      const nx0 = n00 + (n10 - n00) * sx;
+      const nx1 = n01 + (n11 - n01) * sx;
+      return nx0 + (nx1 - nx0) * sy;
+    }
+
+    const dots = [];
+    for (let x = GAP; x < WIDTH; x += GAP) {
+      for (let y = GAP; y < HEIGHT; y += GAP) {
+        dots.push({
+          x, y,
+          seed: Math.random() * 1000,
+          glitchSpeed: 0.4 + Math.random() * 0.8,
+          glitchAmt: 0.04 + Math.random() * 0.06
+        });
+      }
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = WIDTH / rect.width;
+      const scaleY = HEIGHT / rect.height;
+      mouseX = (e.clientX - rect.left) * scaleX;
+      mouseY = (e.clientY - rect.top) * scaleY;
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      mouseX = -1000;
+      mouseY = -1000;
+    });
+
+    function draw(time) {
+      const t_sec = time * 0.001;
+
+      // Lerp cursor for trailing delay
+      cursorX += (mouseX - cursorX) * LERP_SPEED;
+      cursorY += (mouseY - cursorY) * LERP_SPEED;
+
+      ctx.fillStyle = BG_COLOR;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      const activeDots = [];
+
+      for (let i = 0; i < dots.length; i++) {
+        const dot = dots[i];
+        const dx = dot.x - cursorX;
+        const dy = dot.y - cursorY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        // Organic radius: warp hover boundary by angle
+        const angle = Math.atan2(dy, dx);
+        const noiseVal = smoothNoise(angle, t_sec * 0.4, 2.0);
+        const localRadius = HOVER_RADIUS * (0.7 + noiseVal * 0.6);
+
+        let radius = BASE_RADIUS;
+        let alpha = 0.6;
+        let active = false;
+
+        if (dist < localRadius) {
+          const t = 1 - dist / localRadius;
+          const ease = t * t;
+
+          const flicker = Math.sin(t_sec * dot.glitchSpeed + dot.seed)
+            * Math.sin(t_sec * dot.glitchSpeed * 2.3 + dot.seed * 0.7)
+            * dot.glitchAmt;
+
+          const glitchSnap = Math.random() < 0.01 * ease ? (Math.random() - 0.5) * 0.15 : 0;
+
+          radius = BASE_RADIUS + (MAX_RADIUS - BASE_RADIUS) * ease * (1 + flicker + glitchSnap);
+          radius = Math.max(BASE_RADIUS, radius);
+          alpha = 0.6 + 0.4 * ease * (1 + flicker * 0.5);
+          alpha = Math.min(1, Math.max(0.3, alpha));
+          active = true;
+        }
+
+        dot._radius = radius;
+        dot._alpha = alpha;
+        dot._active = active;
+        dot._dist = dist;
+
+        if (active) activeDots.push(dot);
+
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${DOT_COLOR_RGB.r}, ${DOT_COLOR_RGB.g}, ${DOT_COLOR_RGB.b}, ${alpha})`;
+        ctx.fill();
+      }
+
+      // Connect each active dot to its single nearest active neighbor
+      ctx.lineWidth = LINE_WIDTH;
+      const connected = new Set();
+      for (let i = 0; i < activeDots.length; i++) {
+        const a = activeDots[i];
+        if (connected.has(i)) continue;
+
+        let bestJ = -1;
+        let bestD = Infinity;
+        for (let j = 0; j < activeDots.length; j++) {
+          if (j === i || connected.has(j)) continue;
+          const b = activeDots[j];
+          const ddx = a.x - b.x;
+          const ddy = a.y - b.y;
+          const d = Math.sqrt(ddx * ddx + ddy * ddy);
+          if (d <= CONNECT_DIST && d < bestD) {
+            bestD = d;
+            bestJ = j;
+          }
+        }
+
+        if (bestJ !== -1) {
+          const b = activeDots[bestJ];
+          const lineAlpha = Math.min(a._alpha, b._alpha) * 0.5;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = `rgba(${DOT_COLOR_RGB.r}, ${DOT_COLOR_RGB.g}, ${DOT_COLOR_RGB.b}, ${lineAlpha})`;
+          ctx.stroke();
+          connected.add(i);
+          connected.add(bestJ);
+        }
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>
